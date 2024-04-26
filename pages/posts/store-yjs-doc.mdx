@@ -1,0 +1,137 @@
+---
+type: post
+author: Nick Beaulieu
+title: How to store a Yjs doc
+date: 2024-04-26
+tag: yjs
+image: /image/posts/store-yjs-doc.png
+---
+
+Yjs is a high-performance CRDT for building collaborative applications that sync automatically.
+
+This guide is a generic description on how to store [Yjs](https://docs.yjs.dev/) docs. The methods described here are agnostic to the contents of the `Y.Doc`, and the type of storage that you choose to use. We'll also examine some possible gotchas when loading Yjs docs.
+
+## Getting started with Yjs
+
+Yjs isn't as intimidating as it may seem at first. Let's create a `Y.Doc`, and add some text to it.
+
+```ts
+import * as Y from 'yjs'
+
+const yDoc = new Y.Doc()
+const yText = yDoc.getText('document')
+
+yText.insert(0, 'Hello world!')
+```
+
+In all likelihood, we'd be using one of the many [editor bindings](https://docs.yjs.dev/ecosystem/editor-bindings) that applies changes to the document, and a [connection provider](https://docs.yjs.dev/ecosystem/connection-provider) to sync the document between collaborators. In this guide, additional providers are excluded for brevity.
+
+No matter what the contents of the `Y.Doc` are, we can always store them in the same way.
+
+## Persisting the `Y.Doc`
+
+We can use the [`encodeStateAsUpdate`](https://docs.yjs.dev/api/document-updates#update-api) function to get a highly compressed format of the document state, including it's full history of changes. This encoded state can be applied to a new `Y.Doc` to restore it's history in the future, and for other users. The `encodeStateAsUpdate` function will return a `Uint8Array` which is just an array of bytes. We can store this byte array in any sort of storage we like.
+
+First we encode the state, and then send it to our server with a form encoding. The server should store the byte array as is, making sure not to modify or truncate it in any way.
+
+From our central server, this byte array can be `PUT` directly into an S3 bucket, or stored as a blob in the database of our choice.
+
+```ts
+const state = Y.encodeStateAsUpdate(yDoc)
+const form = new FormData()
+form.append('yDoc', state)
+
+await fetch('https://api.server.com/document/:id', {
+  method: 'POST',
+  body: form,
+})
+```
+
+## Restoring the `Y.Doc`
+
+When a new user visits the page, we'll need to retrieve the `Y.Doc`'s state encoded as an update and apply it to a brand new `Y.Doc`. Once we've applied the update to the `Y.Doc`, it is ready to use.
+
+It's important not to initialize any fields on the new `Y.Doc` before it's synced. Even calling `getText` on the `Y.Doc` will initialize the `YText` field if it doesn't exist yet. Be sure to restore the document with `applyUpdate` before allowing the user to make any changes to it.
+
+```ts
+const response = await fetch('https://api.server.com/document/:id')
+const buffer = await response.arrayBuffer()
+const state = new Uint8Array(buffer)
+
+const yDoc = new Y.Doc()
+Y.applyUpdate(yDoc, state)
+
+// yDoc is ready to use!
+
+const contents = yDoc.getText('document').toString()
+console.log(contents) // 'Hello world!'
+```
+
+## Usage
+
+Where is the correct place to put this persistence logic?
+
+Generally, it's best to centralize this logic in a single location if possible. If we have a central server that is responsible for syncing updates between users, we can hook into updates to know when to persist the changes periodically.
+
+It's also a good idea to store a copy of the `Y.Doc` locally in the client when it's feasible. Then, a user can have the same experience when they go offline, or are having network connectivity issues that cause the syncing connection to break from time to time. The [`y-indexeddb`](https://docs.yjs.dev/ecosystem/database-provider/y-indexeddb) provider makes this simple, with only one line of code.
+
+```ts
+import { IndexeddbPersistence } from 'y-indexeddb'
+import { nanoid } from 'nanoid'
+...
+
+const yDoc = new Y.Doc()
+const docId = nanoid() // a universally unique ID
+
+new IndexeddbPersistence(docId, ydoc)
+```
+
+One great thing about Yjs is that as long as the document is persisted to one location (whether that is a client or server), it can always be synced back to other clients. Once a new `Y.Doc` has received all of the doc updates from another location, it is guaranteed to be in the same state.
+
+### `y-websocket`
+
+One of the most common providers to use with Yjs is the [`y-websocket`](https://docs.yjs.dev/ecosystem/connection-provider/y-websocket) provider, which has both client and server code. This provider handles syncing updates to the document between users. The server code exposes a callback system that provides a similar encoded state.
+
+### `y-partykit`
+
+[Partykit](https://www.partykit.io/) is a framework for developing multiplayer applications. They provide the [`y-partykit`](https://docs.partykit.io/reference/y-partykit-api/) library to make syncing data easier. The persist and restore code provided above fits perfectly into their [example](https://docs.partykit.io/reference/y-partykit-api/#persistence) for **Persisting to an external service** from the Partykit server.
+
+## Caveats / Gotchas
+
+While Yjs makes storing the updates as simple as possible, there are a few common pitfalls that we'll want to be aware of.
+
+### Use globally unique IDs
+
+When connecting a provider to a new `Y.Doc`, we need to pass a globally unique ID to the provider. Appropriate choices for generating doc IDs would be `uuidv4` or `nanoid`. If we don't use unique IDs, two separate documents could have an ID collision, and their histories would be different. Yjs providers wouldn't know how to reconcile the differences.
+
+### Initializing the document with default content
+
+It's okay to initialize a `Y.Doc` with default content, as long as it's only ever initialized in **one** location. That one location we choose can be the client or the server, as long as the logic isn't duplicated elsewhere.
+
+On the client, our app could generate a new `Y.Doc` and add some default content before allowing the user to edit it. Then, it should be synced to other users and persisted by the server as-is. If the server also tries to add that same default content, it will end up duplicated when the update is synced back to the client. The default content will have been inserted twice at that point.
+
+On the server, we could create a new `Y.Doc` and populate it with initial text before serving it to any clients. In that case, clients should not try to populate the same content. For the same reason as above, the content will have been inserted twice and will appear duplicated.
+
+In a similar vein, be careful to `await` so that existing document updates are synced to a new client before changes can be made by the client. For example, say the new client initializes the document with a specific `YText` field our app expects and allows the user to insert some text. If that happens before being fully synced, it could cause a bad experience for the new user whose text now appears out of order from what they expected. Generally, the app shouldn't crash catastrophically, but it may cause unexpected behavior.
+
+### Accidental truncation
+
+If the byte array is accidentally cut off by some part of our infrastructure (either persisting or restoring it), it can lead to unexpected errors.
+
+For example, if we call `.getReader()` on a `Response` body, it returns a `ReadableStream` iterator. If we fail to read the entire stream, we'll only have part of the data that we need.
+
+Regardless of how we end up with a truncated byte array, Yjs won't be able to `applyUpdate` if part of the data is missing. Here is a brief example showing one of the possible errors we could encounter.
+
+```ts
+const badServerData = [35, 32, 123, 123, 32, 114, ...]
+
+const yDoc = new Y.Doc()
+Y.applyUpdate(yDoc, new Uint8Array(badServerData))
+// RangeError: Invalid typed array length: 46
+```
+
+## Getting help
+
+Be sure to check the Yjs [forum](https://discuss.yjs.dev/) for examples if you run into issues. The forum is active, and many people describe edge-case errors that they've run into on the forum. If you're trying to do something outside of the box, someone has probably tried it before and posted about it.
+
+Another great resource and active community is the Partykit [discord](https://discord.gg/KDZb7J4uxJ), which has an extensive help channel with many questions and answers.
