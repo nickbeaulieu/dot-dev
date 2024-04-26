@@ -22,7 +22,6 @@ export default {
         {meta.tag && <meta name="keywords" content={meta.tag} />}
         {meta.author && <meta name="author" content={meta.author} />}
         <meta name="robots" content="follow, index" />
-
         <meta property="og:site_name" content={meta.title} />
         <meta property="og:description" content={meta.description} />
         <meta property="og:title" content={meta.title} />
