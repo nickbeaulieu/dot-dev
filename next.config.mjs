@@ -12,6 +12,18 @@ export default withNextra({
   images: {
     unoptimized: true,
   },
+  webpack: (config) => {
+    config.module.rules.push({
+      test: /\.pdf$/,
+      use: {
+        loader: 'file-loader',
+        options: {
+          name: '[path][name].[ext]',
+        },
+      },
+    })
+    return config
+  },
 })
 
 // If you have other Next.js configurations, you can pass them as the parameter:
