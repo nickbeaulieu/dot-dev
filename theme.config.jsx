@@ -6,9 +6,6 @@ export default {
         <a href="https://github.com/nickbeaulieu" target="github">
           Github
         </a>
-        <a href="https://twitter.com/nickbeaulieu_" target="twitter">
-          Twitter
-        </a>
       </p>
     </>
   ),
